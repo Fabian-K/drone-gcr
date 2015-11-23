@@ -11,6 +11,13 @@ import (
 	"github.com/drone/drone-plugin-go/plugin"
 )
 
+type Save struct {
+	// Absolute or relative path
+	File string   `json:"destination"`
+	// Only save specified tags (optional)
+	Tags  StrSlice `json:"tag"`
+}
+
 type Docker struct {
 	Registry string   `json:"registry"`
 	Storage  string   `json:"storage_driver"`
@@ -19,6 +26,8 @@ type Docker struct {
 	Tag      StrSlice `json:"tag"`
 	File     string   `json:"file"`
 	Context  string   `json:"context"`
+	Load     string   `json:"load"`
+	Save     Save     `json:"save"`
 }
 
 func main() {
@@ -46,6 +55,18 @@ func main() {
 	// Set the Tag value
 	if vargs.Tag.Len() == 0 {
 		vargs.Tag = StrSlice{[]string{"latest"}}
+	}
+	// Get absolute path for 'save' file
+	if len(vargs.Save.File) != 0 {
+		if ! filepath.IsAbs(vargs.Save.File) {
+			vargs.Save.File = filepath.Join(workspace.Path, vargs.Save.File)
+		}
+	}
+	// Get absolute path for 'load' file
+	if len(vargs.Load) != 0 {
+		if ! filepath.IsAbs(vargs.Load) {
+			vargs.Load = filepath.Join(workspace.Path, vargs.Load)
+		}
 	}
 	// Concat the Registry URL and the Repository name if necessary
 	if strings.Count(vargs.Repo, "/") == 1 {
@@ -96,6 +117,23 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Restore from tarred image repository
+	if len(vargs.Load) != 0 {
+		if _, err := os.Stat(vargs.Load); err != nil {
+			fmt.Printf("Archive %s does not exist. Building from scratch.\n", vargs.Load)
+		} else {
+			cmd := exec.Command("/usr/bin/docker", "load", "-i", vargs.Load)
+			cmd.Dir = workspace.Path
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			trace(cmd)
+			err := cmd.Run()
+			if err != nil {
+				os.Exit(1)
+			}
+		}
+	}
+
 	// Build the container
 	cmd = exec.Command("/usr/bin/docker", "build", "--pull=true", "--rm=true", "-f", vargs.File, "-t", build.Commit, vargs.Context)
 	cmd.Dir = workspace.Path
@@ -136,6 +174,34 @@ func main() {
 	err = cmd.Run()
 	if err != nil {
 		os.Exit(1)
+	}
+
+	// Save to tarred image repository
+	if len(vargs.Save.File) != 0 {
+		// if the destination directory does not exist, create it
+		dir := filepath.Dir(vargs.Save.File)
+		os.MkdirAll(dir, 0755)
+
+		cmd = exec.Command("/usr/bin/docker", "save", "-o", vargs.Save.File)
+
+		// Limit saving to the given tags
+		if vargs.Save.Tags.Len() != 0 {
+			for _, tag := range vargs.Save.Tags.Slice() {
+				name_ := fmt.Sprintf("%s:%s", vargs.Repo, tag)
+				cmd.Args = append(cmd.Args, name_)
+			}
+		} else {
+			cmd.Args = append(cmd.Args, vargs.Repo)
+		}
+
+		cmd.Dir = workspace.Path
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		trace(cmd)
+		err := cmd.Run()
+		if err != nil {
+			os.Exit(1)
+		}
 	}
 }
 
